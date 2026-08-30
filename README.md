@@ -29,7 +29,7 @@ Maintainer: XXX YYYYYY <xxx.yyyyyy@zzzzz.com>
 ### Table of Contents
 
   I. Adding the meta-dsandbox layer to your build
- II. Misc
+  II. Misc
 
 
 #### I. Adding the meta-dsandbox layer to your build
