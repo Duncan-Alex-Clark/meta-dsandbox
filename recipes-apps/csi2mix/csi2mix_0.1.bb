@@ -11,7 +11,7 @@ SRC_URI = "\
     file://README.md \
 "
 
-FPGA_APP_DIR = "/lib/firmware/xilinx/csi2mix"
+FPGA_APP_DIR = "${nonarch_base_libdir}/firmware/xilinx/csi2mix"
 DTS_DIR = "${WORKDIR}/device-tree"
 
 do_compile() {
@@ -19,7 +19,7 @@ do_compile() {
         -@ \
         -I dts \
         -O dtb \
-        -o csi2mix.dtbo \
+        -o ${B}/csi2mix.dtbo \
         ${DTS_DIR}/pl.dtsi
 }
 
@@ -28,10 +28,10 @@ do_install() {
 
     install -m 0644 \
         ${WORKDIR}/csi2mix.bin \
-        ${D}${FPGA_AP_DIR}/csi2mix.bin
+        ${D}${FPGA_APP_DIR}/csi2mix.bin
 
     install -m 0644 \
-        ${WORKDIR}/csi2mix.dtbo \
+        ${B}/csi2mix.dtbo \
         ${D}${FPGA_APP_DIR}/csi2mix.dtbo
 
     install -m 0644 \
