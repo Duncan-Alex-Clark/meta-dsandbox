@@ -1,0 +1,159 @@
+/*
+ * Device-tree overlay for Duncan's KV260 csi2stream design.
+ *
+ * Hardware represented here:
+ *   - ZynqMP PL0 fabric clock at approximately 100 MHz
+ *   - Video Timing Controller at 0x80000000
+ *   - Video Test Pattern Generator at 0x80010000
+ *
+ * Important:
+ *   This overlay intentionally does NOT connect zynqmp_dpsub port@0.
+ *   The current bitstream has no Linux DRM CRTC/display-source IP such as
+ *   the Xilinx Video Mixer or PL Display + framebuffer DMA reader.
+ *
+ *   Connecting port@0 without such a DRM source would make the ZynqMP
+ *   DisplayPort driver select live-video bridge mode, remove its DPDMA
+ *   framebuffer, and leave no DRM device capable of performing a modeset.
+ */
+
+/dts-v1/;
+/plugin/;
+
+&fpga_full {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	firmware-name = "top_wrapper.bit.bin";
+	resets = <&zynqmp_reset 116>;
+
+	clocking0: clocking0 {
+		#clock-cells = <0>;
+		assigned-clock-rates = <99999001>;
+		assigned-clocks = <&zynqmp_clk 71>;
+		clock-output-names = "fabric_clk";
+		clocks = <&zynqmp_clk 71>;
+		compatible = "xlnx,fclk";
+	};
+
+	afi0: afi0 {
+		compatible = "xlnx,afi-fpga";
+		config-afi =
+			<0 0>,
+			<1 0>,
+			<2 0>,
+			<3 0>,
+			<4 0>,
+			<5 0>,
+			<6 0>,
+			<7 0>,
+			<8 0>,
+			<9 0>,
+			<10 0>,
+			<11 0>,
+			<12 0>,
+			<13 0>,
+			<14 0x0a00>,
+			<15 0x0200>;
+		resets =
+			<&zynqmp_reset 116>,
+			<&zynqmp_reset 117>,
+			<&zynqmp_reset 118>,
+			<&zynqmp_reset 119>;
+	};
+
+	misc_clk_0: misc_clk_0 {
+		#clock-cells = <0>;
+		clock-div = <1>;
+		clock-mult = <1>;
+		clocks = <&zynqmp_clk 71>;
+		compatible = "fixed-factor-clock";
+		clock-output-names = "video_clk";
+	};
+};
+/*
+/ {
+	ov5647_clk: ov5647-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	ov5647: camera@36 {
+		compatible = "ovti,ov5647";
+		reg = <0x36>;
+
+		clocks = <&ov5647_clk>;
+		clock-names = "xclk";
+
+		port {
+			ov5647_out: endpoint {
+				remote_endpoint = <&mipi_csi2_in>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};
+*/
+&amba {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	v_tc_0: v_tc@80000000 {
+		compatible = "xlnx,bridge-v-tc-6.1";
+		reg = <0x0 0x80000000 0x0 0x10000>;
+
+		clock-names = "clk", "s_axi_aclk";
+		clocks = <&misc_clk_0>, <&zynqmp_clk 71>;
+
+		xlnx,generator;
+		xlnx,pixels-per-clock = <1>;
+	};
+
+	v_tpg_0: v_tpg@80010000 {
+		compatible = "xlnx,v-tpg-8.2", "xlnx,v-tpg-8.0";
+		reg = <0x0 0x80010000 0x0 0x10000>;
+
+		clock-names = "ap_clk";
+		clocks = <&zynqmp_clk 71>;
+
+		xlnx,max-height = <1080>;
+		xlnx,max-width = <1920>;
+		xlnx,ppc = <1>;
+		xlnx,s-axi-ctrl-addr-width = <8>;
+		xlnx,s-axi-ctrl-data-width = <32>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				xlnx,video-format = <0>;
+				xlnx,video-width = <8>;
+			};
+
+			port@1 {
+				reg = <1>;
+				xlnx,video-format = <0>;
+				xlnx,video-width = <8>;
+			};
+		};
+	};
+};
+
+/*
+ * Do not add a zynqmp_dpsub port@0 endpoint until the Vivado design
+ * contains a Linux-supported DRM source, normally one of:
+ *
+ *   1. Xilinx Video Mixer configured as the DRM CRTC, or
+ *   2. xlnx,pl-disp backed by a framebuffer-read DMA engine.
+ *
+ * Once that hardware exists, zynqmp_dpsub must also receive the actual PL
+ * live-video pixel clock and reciprocal graph endpoints.
+ */
+

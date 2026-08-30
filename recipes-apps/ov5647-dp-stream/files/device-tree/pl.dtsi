@@ -1,0 +1,403 @@
+/*
+ * KV260 OV5647 camera pipeline
+ *
+ * I2C topology:
+ *
+ *   AXI IIC @ 0x80040000
+ *       |
+ *       +-- PCA9546 @ 0x74
+ *               |
+ *               +-- Channel 2
+ *                       |
+ *                       +-- OV5647 @ 0x36
+ *
+ * Video topology:
+ *
+ *   OV5647
+ *       -> MIPI CSI-2 RX
+ *       -> Sensor Demosaic
+ *       -> TPG input
+ */
+
+/dts-v1/;
+/plugin/;
+
+
+/*
+ * FPGA region and PL clocks
+ */
+&fpga_full {
+	firmware-name = "ov5647stream.bit.bin";
+	resets = <&zynqmp_reset 116>;
+
+	clocking0: clocking0 {
+		compatible = "xlnx,fclk";
+
+		#clock-cells = <0>;
+
+		assigned-clocks = <&zynqmp_clk 71>;
+		assigned-clock-rates = <99999001>;
+
+		clock-output-names = "fabric_clk";
+		clocks = <&zynqmp_clk 71>;
+	};
+
+	afi0: afi0 {
+		compatible = "xlnx,afi-fpga";
+
+		config-afi =
+			<0 0>,
+			<1 0>,
+			<2 0>,
+			<3 0>,
+			<4 0>,
+			<5 0>,
+			<6 0>,
+			<7 0>,
+			<8 0>,
+			<9 0>,
+			<10 0>,
+			<11 0>,
+			<12 0>,
+			<13 0>,
+			<14 0xa00>,
+			<15 0x200>;
+
+		resets =
+			<&zynqmp_reset 116>,
+			<&zynqmp_reset 117>,
+			<&zynqmp_reset 118>,
+			<&zynqmp_reset 119>;
+	};
+
+	/*
+	 * 200 MHz D-PHY reference clock.
+	 *
+	 * The source FCLK is approximately 100 MHz.
+	 */
+	misc_clk_0: misc-clk-0 {
+		compatible = "fixed-factor-clock";
+
+		#clock-cells = <0>;
+
+		clocks = <&zynqmp_clk 71>;
+		clock-div = <1>;
+		clock-mult = <2>;
+	};
+
+	/*
+	 * Approximately 100 MHz AXI/video clock.
+	 */
+	misc_clk_1: misc-clk-1 {
+		compatible = "fixed-factor-clock";
+
+		#clock-cells = <0>;
+
+		clocks = <&zynqmp_clk 71>;
+		clock-div = <1>;
+		clock-mult = <1>;
+	};
+
+	/*
+	 * The camera module provides a non-controllable reference clock.
+	 * This node describes that clock to the OV5647 driver.
+	 */
+	ov5647_xclk: ov5647-xclk {
+		compatible = "fixed-clock";
+
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+};
+
+
+/*
+ * Programmable-logic peripherals
+ */
+&amba {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+
+	/*
+	 * AXI IIC controller
+	 */
+	axi_iic_0: i2c@80040000 {
+		compatible =
+			"xlnx,axi-iic-2.1",
+			"xlnx,xps-iic-2.00.a";
+
+		reg = <0x0 0x80040000 0x0 0x10000>;
+
+		clock-names = "s_axi_aclk";
+		clocks = <&zynqmp_clk 71>;
+
+		/*
+		 * Start at 100 kHz for camera bring-up.
+		 * Change to 400000 after reliable operation is confirmed.
+		 */
+		clock-frequency = <100000>;
+
+		interrupt-names = "iic2intc_irpt";
+		interrupt-parent = <&gic>;
+		interrupts = <0 90 4>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		status = "okay";
+
+		/*
+		 * KV260 carrier-card PCA9546 four-channel I2C mux.
+		 */
+		i2c_mux: i2c-mux@74 {
+			compatible = "nxp,pca9546";
+			reg = <0x74>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			//i2c-mux-idle-disconnect;
+
+			/*
+			 * Channel 2 is connected to the Raspberry Pi
+			 * camera connector J9.
+			 */
+			i2c_rpi: i2c@2 {
+				reg = <2>;
+
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ov5647: camera@36 {
+					compatible = "ovti,ov5647";
+					reg = <0x36>;
+
+					clocks = <&ov5647_xclk>;
+
+					status = "okay";
+
+					port {
+						ov5647_out: endpoint {
+							data-lanes = <1 2>;
+							clock-noncontinuous;
+
+							remote-endpoint =
+								<&mipi_csi_in>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+
+	/*
+	 * MIPI CSI-2 Receiver Subsystem
+	 *
+	 * 0x2b is the MIPI CSI-2 RAW10 data type.
+	 */
+	mipi_csi2_rx_subsyst_0:
+	mipi-csi2-rx-subsystem@80020000 {
+		compatible =
+			"xlnx,mipi-csi2-rx-subsystem-6.0",
+			"xlnx,mipi-csi2-rx-subsystem-5.0";
+
+		reg = <0x0 0x80020000 0x0 0x1000>;
+
+		clock-names =
+			"dphy_clk_200M",
+			"lite_aclk",
+			"video_aclk";
+
+		clocks =
+			<&misc_clk_0>,
+			<&zynqmp_clk 71>,
+			<&misc_clk_1>;
+
+		interrupt-names = "csirxss_csi_irq";
+		interrupt-parent = <&gic>;
+		interrupts = <0 89 4>;
+
+		xlnx,axis-tdata-width = <32>;
+		xlnx,csi-pxl-format = <0x2b>;
+		xlnx,max-lanes = <2>;
+		xlnx,ppc = <1>;
+		xlnx,vc = <4>;
+		xlnx,vfb;
+
+		status = "okay";
+
+		mipi_csi_ports: ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * Sink from the OV5647.
+			 */
+			port@0 {
+				reg = <0>;
+
+				mipi_csi_in: endpoint {
+					data-lanes = <1 2>;
+					clock-noncontinuous;
+
+					remote-endpoint =
+						<&ov5647_out>;
+				};
+			};
+
+			/*
+			 * RAW10 source to the demosaic block.
+			 */
+			port@1 {
+				reg = <1>;
+
+				mipi_csi_out: endpoint {
+					remote-endpoint =
+						<&demosaic_in>;
+				};
+			};
+		};
+	};
+
+
+	/*
+	 * Sensor Demosaic
+	 */
+	v_demosaic_0: v-demosaic@80030000 {
+		compatible =
+			"xlnx,v-demosaic-1.1",
+			"xlnx,v-demosaic";
+
+		reg = <0x0 0x80030000 0x0 0x10000>;
+
+		clock-names = "ap_clk";
+		clocks = <&misc_clk_1>;
+
+		interrupt-names = "interrupt";
+		interrupt-parent = <&gic>;
+		interrupts = <0 91 4>;
+
+		xlnx,max-height = <1080>;
+		xlnx,max-width = <1920>;
+		xlnx,s-axi-ctrl-addr-width = <0x6>;
+		xlnx,s-axi-ctrl-data-width = <0x20>;
+
+		status = "okay";
+
+		demosaic_ports: ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * RAW10 sink from the CSI-2 RX.
+			 */
+			port@0 {
+				reg = <0>;
+
+				demosaic_in: endpoint {
+					remote-endpoint =
+						<&mipi_csi_out>;
+				};
+			};
+
+			/*
+			 * RGB source to the TPG input.
+			 */
+			port@1 {
+				reg = <1>;
+
+				demosaic_out: endpoint {
+					remote-endpoint =
+						<&tpg_in>;
+				};
+			};
+		};
+	};
+
+
+	/*
+	 * Video Timing Controller
+	 */
+	v_tc_0: v-tc@80000000 {
+		compatible =
+			"xlnx,v-tc-6.2",
+			"xlnx,v-tc-6.1",
+			"xlnx,bridge-v-tc-6.1";
+
+		reg = <0x0 0x80000000 0x0 0x10000>;
+
+		clock-names = "clk", "s_axi_aclk";
+		clocks = <&misc_clk_1>, <&zynqmp_clk 71>;
+
+		interrupt-names = "irq";
+		interrupt-parent = <&gic>;
+		interrupts = <0 93 4>;
+
+		xlnx,generator;
+		xlnx,pixels-per-clock = <1>;
+
+		status = "okay";
+	};
+
+
+	/*
+	 * Video Test Pattern Generator
+	 *
+	 * The input is connected to the demosaic RGB output.
+	 * Configure the TPG for pass-through mode at runtime.
+	 */
+	v_tpg_0: v-tpg@80010000 {
+		compatible =
+			"xlnx,v-tpg-8.2",
+			"xlnx,v-tpg-8.0";
+
+		reg = <0x0 0x80010000 0x0 0x10000>;
+
+		clock-names = "ap_clk";
+		clocks = <&misc_clk_1>;
+
+		interrupt-names = "interrupt";
+		interrupt-parent = <&gic>;
+		interrupts = <0 92 4>;
+
+		xlnx,max-height = <1080>;
+		xlnx,max-width = <1920>;
+		xlnx,ppc = <1>;
+		xlnx,s-axi-ctrl-addr-width = <8>;
+		xlnx,s-axi-ctrl-data-width = <32>;
+
+		status = "okay";
+
+		tpg_ports: ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * RGB sink from Demosaic.
+			 */
+			port@0 {
+				reg = <0>;
+
+				xlnx,video-format = <2>;
+				xlnx,video-width = <8>;
+
+				tpg_in: endpoint {
+					remote-endpoint =
+						<&demosaic_out>;
+				};
+			};
+
+			/*
+			 * RGB output to the downstream hardware pipeline.
+			 */
+			port@1 {
+				reg = <1>;
+
+				xlnx,video-format = <2>;
+				xlnx,video-width = <8>;
+			};
+		};
+	};
+};
