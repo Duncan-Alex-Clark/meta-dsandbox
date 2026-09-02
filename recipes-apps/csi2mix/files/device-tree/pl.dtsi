@@ -41,17 +41,48 @@
  *   Demosaic
  *      |
  *      v
+ *   Gamma LUT
+ *      |
+ *      v
  *   video_capture
  *      |
  *      +---- DMA ----> Frame Buffer Write
  *
  *
- * The V4L2 graph intentionally matches the previously working
- * csi2testing application.
+ * WHY THE GRAPH AND THE HARDWARE PATH DIFFER
  *
- * Gamma, AXIS Broadcaster and Mixer are physically in the stream,
- * but are not placed downstream of Demosaic in the xlnx,video
- * media graph.
+ * Every Xilinx HLS video core in this design needs its driver to write
+ * width, height and the ap_start bit before it will pass pixels, and the
+ * xlnx,video composite driver only does that for entities it can reach by
+ * walking this graph (see xvip_graph_pipeline_start_stop() in
+ * drivers/media/platform/xilinx/xilinx-vipp.c).  A core left out of the
+ * graph never starts and stalls the stream.
+ *
+ * Gamma is therefore linked Demosaic -> Gamma -> video_capture even though
+ * the physical stream continues Gamma -> Broadcaster -> Mixer -> Frame
+ * Buffer Write.  Each subdevice only touches its own register block, so the
+ * shortened link is harmless; the graph exists to propagate formats and to
+ * order the s_stream calls.
+ *
+ * The two blocks omitted from the graph need no driver action:
+ *
+ *   AXIS Broadcaster - xvbr_s_stream() is a no-op, so the core needs no
+ *                      software start at all.  Omitted entirely; its driver
+ *                      would also demand two source ports with endpoints.
+ *
+ *   Video Mixer      - has no V4L2 subdevice driver.  See the mixer node.
+ *
+ *
+ * FORMAT CONSTRAINT INTRODUCED BY GAMMA
+ *
+ * xg_set_format() forces MEDIA_BUS_FMT_RBG888_1X24 on the Gamma sink pad
+ * regardless of xlnx,video-width.  With Gamma in the graph the pipeline
+ * must therefore be configured as 8-bit RGB end to end, and capture must
+ * use BGR24 or RGB24.  The frame buffer's xbgr2101010 format maps to
+ * MEDIA_BUS_FMT_RBG101010_1X30 and will fail link validation.
+ *
+ * xlnx,video-width stays at 10 because it describes the physical AXI-Stream
+ * width built into the IP, not the media bus code.
  *
  *
  * I2C:
@@ -69,10 +100,14 @@
  *
  * Resets:
  *
- * GPIO[0] -> Demosaic
- * GPIO[1] -> Frame Buffer Write
- * GPIO[3] -> Gamma LUT
- * GPIO[4] -> Video Mixer
+ * GPIO[0] -> Demosaic          (claimed by the demosaic driver)
+ * GPIO[1] -> Frame Buffer Write (claimed by the frmbuf driver)
+ * GPIO[2] -> reserved / unknown
+ * GPIO[3] -> Gamma LUT         (claimed by the gamma driver)
+ * GPIO[4] -> Video Mixer       (unclaimed; drive from userspace if needed)
+ *
+ * xlnx,dout-default brings every line up high, so the active-low mixer
+ * reset is already deasserted at boot.
  */
 
 
@@ -180,10 +215,12 @@
 	/* ----------------------------------------------------------------- */
 	/* Xilinx V4L2 composite capture device                              */
 	/*                                                                   */
-	/* This intentionally matches the working csi2testing topology.      */
+	/* Creates /dev/mediaN, /dev/v4l-subdevN and /dev/videoN.  The media */
+	/* device is not optional: the frame buffer write has no standalone  */
+	/* V4L2 driver, and this graph is what starts the HLS cores.         */
 	/*                                                                   */
-	/* V4L2 graph terminates at Demosaic.                                */
-	/* Frame Buffer Write is referenced separately as the DMA provider.  */
+	/* The graph terminates at Gamma; Frame Buffer Write is referenced   */
+	/* separately as the DMA provider.                                   */
 	/* ----------------------------------------------------------------- */
 
 	video_capture: video-capture {
@@ -203,7 +240,7 @@
 				direction = "input";
 
 				video_capture_in: endpoint {
-					remote-endpoint = <&demosaic_out>;
+					remote-endpoint = <&gamma_out>;
 				};
 			};
 		};
@@ -236,6 +273,17 @@
 
 		gpio-controller;
 		#gpio-cells = <2>;
+
+		/*
+		 * Names the five reset lines so the unclaimed mixer reset can
+		 * be found with gpioinfo / libgpiod.
+		 */
+		gpio-line-names =
+			"demosaic-reset-n",
+			"frmbuf-wr-reset-n",
+			"reserved",
+			"gamma-lut-reset-n",
+			"v-mix-reset-n";
 
 		xlnx,all-inputs = <0x0>;
 		xlnx,all-inputs-2 = <0x0>;
@@ -503,12 +551,11 @@
 
 
 			/*
-			 * Demosaic -> xlnx,video
+			 * Demosaic -> Gamma
 			 *
-			 * This is deliberately identical to the known-working
-			 * csi2testing V4L2 graph.
-			 *
-			 * Physically, the stream continues into Gamma.
+			 * The demosaic source pad must be driven to
+			 * MEDIA_BUS_FMT_RBG888_1X24; Gamma accepts nothing
+			 * else on its sink pad.
 			 */
 			port@1 {
 				reg = <1>;
@@ -516,6 +563,85 @@
 				xlnx,video-width = <10>;
 
 				demosaic_out: endpoint {
+					remote-endpoint =
+						<&gamma_in>;
+				};
+			};
+		};
+	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* Video Gamma LUT                                                   */
+	/*                                                                   */
+	/* Part of the xlnx,video graph so that xg_s_stream() runs and writes */
+	/* width, height, the LUT contents and the ap_start bit.  Being in    */
+	/* the graph is also what gives Gamma a /dev/v4l-subdevN node, which  */
+	/* is how the red/green/blue gamma-correction V4L2 controls are       */
+	/* reached from userspace.                                           */
+	/*                                                                   */
+	/* The physical stream continues Gamma -> Broadcaster -> Mixer; the   */
+	/* graph link straight to video_capture is deliberate.               */
+	/* ----------------------------------------------------------------- */
+
+	v_gamma_lut_0: v-gamma-lut@80050000 {
+		compatible =
+			"xlnx,v-gamma-lut-1.1",
+			"xlnx,v-gamma-lut";
+
+		reg = <0x0 0x80050000 0x0 0x10000>;
+
+		clock-names = "ap_clk";
+		clocks = <&video_clk_150mhz>;
+
+		interrupt-names = "interrupt";
+		interrupt-parent = <&gic>;
+		interrupts = <0 93 4>;
+
+		/*
+		 * Dedicated reset GPIO line 3.
+		 */
+		reset-gpios = <&axi_gpio_0 3 1>;
+
+		xlnx,max-height = <2160>;
+		xlnx,max-width = <3840>;
+
+		xlnx,s-axi-ctrl-addr-width = <13>;
+		xlnx,s-axi-ctrl-data-width = <32>;
+
+		status = "okay";
+
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+
+			/* Demosaic -> Gamma */
+			port@0 {
+				reg = <0>;
+
+				/*
+				 * Selects the 10-bit gamma curve tables in
+				 * the driver; must match the data width the
+				 * IP was built with.
+				 */
+				xlnx,video-width = <10>;
+
+				gamma_in: endpoint {
+					remote-endpoint =
+						<&demosaic_out>;
+				};
+			};
+
+
+			/* Gamma -> xlnx,video */
+			port@1 {
+				reg = <1>;
+
+				xlnx,video-width = <10>;
+
+				gamma_out: endpoint {
 					remote-endpoint =
 						<&video_capture_in>;
 				};
@@ -564,8 +690,11 @@
 		xlnx,s-axi-ctrl-data-width = <0x20>;
 
 		/*
-		 * Retain the same enabled formats as the known-working
-		 * Frame Buffer Write configuration.
+		 * These must match the formats enabled in the IP GUI.
+		 *
+		 * Only rgb888 and bgr888 are usable while Gamma is in the
+		 * graph; xbgr2101010 maps to RBG101010_1X30, which Gamma
+		 * rejects.
 		 */
 		xlnx,vid-formats =
 			"rgb888",
@@ -579,73 +708,72 @@
 
 
 	/* ----------------------------------------------------------------- */
-	/* Video Gamma LUT                                                   */
+	/* Video Mixer - userspace (UIO) controlled                          */
 	/*                                                                   */
-	/* Gamma remains a platform/V4L2 subdevice driver, but is NOT part   */
-	/* of the xlnx,video graph.                                          */
+	/* The mixer has no V4L2 subdevice driver.  Its only Linux driver is */
+	/* drivers/gpu/drm/xlnx/xlnx_mixer.c, which models the core as a DRM */
+	/* CRTC.  That driver writes XVMIX_AP_CTRL from exactly one place,   */
+	/* xlnx_mix_start(), reachable only via xlnx_mix_crtc_atomic_enable()*/
+	/* -- and drm_atomic_helper_check_modeset() refuses to enable a CRTC */
+	/* that has no connectors.  This design has no encoder or connector: */
+	/* the mixer output goes to the frame buffer write, not to a display.*/
+	/* Bound to the DRM driver the core would therefore never start, and */
+	/* would backpressure the AXI stream forever.                        */
 	/*                                                                   */
-	/* Its physical AXI stream remains connected in Vivado:              */
+	/* So the node deliberately carries only "generic-uio".  OF matching  */
+	/* hits on any string in the list, so no xlnx,v-mix-* / xlnx,mixer-* */
+	/* compatible may appear here or the DRM driver would claim it again. */
 	/*                                                                   */
-	/*      Demosaic -> Gamma -> Broadcaster                             */
+	/* Requires uio_pdrv_genirq, whose match table is filled from a       */
+	/* module parameter:                                                 */
 	/*                                                                   */
-	/* The port nodes remain because the Gamma driver uses their          */
-	/* xlnx,video-width properties to describe the hardware.             */
+	/*     uio_pdrv_genirq.of_id=generic-uio      (kernel command line)  */
+	/*     modprobe uio_pdrv_genirq of_id=generic-uio                    */
+	/*                                                                   */
+	/* Userspace then mmaps /dev/uioN (find it by linux,uio-name below)  */
+	/* and programs the core directly.  Register map, taken from         */
+	/* xlnx_mixer.c:                                                     */
+	/*                                                                   */
+	/*     0x00 AP_CTRL          write 0x81 (auto-restart | start)       */
+	/*     0x10 WIDTH_DATA       background/active area width            */
+	/*     0x18 HEIGHT_DATA      background/active area height           */
+	/*     0x28 BACKGROUND_Y_R                                           */
+	/*     0x30 BACKGROUND_U_G                                           */
+	/*     0x38 BACKGROUND_V_B                                           */
+	/*     0x40 LAYERENABLE_DATA bitmask of enabled layers               */
+	/*                                                                   */
+	/*   per-layer block at 0x100 + id * 0x100, id 1..15:                */
+	/*                                                                   */
+	/*     +0x00 ALPHA           0..256                                  */
+	/*     +0x08 STARTX                                                  */
+	/*     +0x10 STARTY                                                  */
+	/*     +0x18 WIDTH                                                   */
+	/*     +0x20 STRIDE          memory-mapped layers only               */
+	/*     +0x28 HEIGHT                                                  */
+	/*     +0x30 SCALE                                                   */
+	/*                                                                   */
+	/* Configure and start the mixer BEFORE VIDIOC_STREAMON: it sits     */
+	/* downstream and must already be draining when the camera starts.   */
+	/*                                                                   */
+	/* Interrupt 94 is the frame-done IRQ, readable via /dev/uioN.       */
+	/* uio_pdrv_genirq masks it until userspace reads, so leaving GIE    */
+	/* and IER disabled is safe if frame-done is not wanted.             */
+	/*                                                                   */
+	/* Reset is AXI GPIO line 4, left unclaimed here.  xlnx,dout-default */
+	/* brings it up high, so the active-low reset is already deasserted; */
+	/* drive it via gpiochip line "v-mix-reset-n" if an explicit reset   */
+	/* is needed.                                                        */
+	/*                                                                   */
+	/* IP configuration, retained for documentation only (UIO ignores    */
+	/* these): 2 layers, both AXI4-Stream fed from the broadcaster,      */
+	/* 10 bits per component, 1 pixel per clock, BG24 layer format,      */
+	/* layer 1 scalable.                                                 */
 	/* ----------------------------------------------------------------- */
-	v_gamma_lut_0: v-gamma-lut@80050000 {
-		compatible =
-			"xlnx,v-gamma-lut-1.1",
-			"xlnx,v-gamma-lut";
 
-		reg = <0x0 0x80050000 0x0 0x10000>;
-
-		clock-names = "ap_clk";
-		clocks = <&video_clk_150mhz>;
-
-		interrupt-names = "interrupt";
-		interrupt-parent = <&gic>;
-		interrupts = <0 93 4>;
-
-		reset-gpios = <&axi_gpio_0 3 1>;
-
-		xlnx,max-height = <2160>;
-		xlnx,max-width = <3840>;
-
-		xlnx,s-axi-ctrl-addr-width = <13>;
-		xlnx,s-axi-ctrl-data-width = <32>;
-
-		status = "okay";
-
-
-		ports {
-			#address-cells = <1>;
-			#size-cells = <0>;
-
-			port@0 {
-				reg = <0>;
-				xlnx,video-width = <10>;
-			};
-
-			port@1 {
-				reg = <1>;
-				xlnx,video-width = <10>;
-			};
-		};
-	};
-
-	/* ----------------------------------------------------------------- */
-	/* Video Mixer                                                       */
-	/*                                                                   */
-	/* Mixer is controlled by the Xilinx DRM mixer driver and is NOT     */
-	/* part of the xlnx,video V4L2 graph.                                */
-	/*                                                                   */
-	/* The physical streaming connections are established in Vivado.     */
-	/* ----------------------------------------------------------------- */
 	v_mix_0: v-mix@80060000 {
-		compatible =
-			"xlnx,v-mix-5.3",
-			"xlnx,mixer-3.0",
-			"xlnx,mixer-4.0",
-			"xlnx,mixer-5.0";
+		compatible = "generic-uio";
+
+		linux,uio-name = "csi2mix-v-mix";
 
 		reg = <0x0 0x80060000 0x0 0x10000>;
 
@@ -656,43 +784,6 @@
 		interrupt-parent = <&gic>;
 		interrupts = <0 94 4>;
 
-		reset-gpios = <&axi_gpio_0 4 1>;
-
-		xlnx,bpc = <10>;
-
-		xlnx,dma-addr-width = <32>;
-		xlnx,num-layers = <2>;
-		xlnx,ppc = <1>;
-
 		status = "okay";
-
-
-
-		layer_0 {
-			xlnx,layer-id = <0>;
-
-			xlnx,layer-max-height = <2160>;
-			xlnx,layer-max-width = <3840>;
-
-			xlnx,layer-primary;
-			xlnx,layer-streaming;
-
-			xlnx,vformat = "BG24";
-		};
-
-
-
-		layer_1 {
-			xlnx,layer-id = <1>;
-
-			xlnx,layer-max-height = <2160>;
-			xlnx,layer-max-width = <3840>;
-
-			xlnx,layer-scale;
-			xlnx,layer-streaming;
-
-			xlnx,vformat = "BG24";
-		};
 	};
 };
-
