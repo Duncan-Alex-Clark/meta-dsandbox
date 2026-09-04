@@ -3,17 +3,60 @@
  *
  * Hardware topology:
  *
- *   OV5647 -> MIPI CSI-2 RX -> Video Demosaic -> Frame Buffer Write -> DDR
+ *   OV5647
+ *      |
+ *      | RAW10
+ *      v
+ *   MIPI CSI-2 RX
+ *      |
+ *      | RAW10
+ *      v
+ *   AXI4-Stream Subset Converter
+ *      |
+ *      | RAW8
+ *      v
+ *   Video Demosaic
+ *      |
+ *      | RGB888
+ *      v
+ *   Video Frame Buffer Write
+ *      |
+ *      v
+ *   DDR
+ *
  *
  * I2C topology:
  *
- *   AXI IIC 0x80010000 -> PCA9546 @ 0x74 -> channel 2 -> OV5647 @ 0x36
+ *   AXI IIC 0x80010000
+ *       |
+ *       v
+ *   PCA9546 @ 0x74
+ *       |
+ *       | channel 2
+ *       v
+ *   OV5647 @ 0x36
+ *
  *
  * Reset topology:
  *
- *   AXI GPIO 0x80000000 line 0 -> v_demosaic_0/ap_rst_n
- *   AXI GPIO 0x80000000 line 1 -> v_frmbuf_wr_0/ap_rst_n
+ *   AXI GPIO 0x80000000
+ *
+ *       line 0 -> v_demosaic_0/ap_rst_n
+ *       line 1 -> v_frmbuf_wr_0/ap_rst_n
+ *
+ *
+ * Video formats:
+ *
+ *   OV5647 output       SBGGR10_1X10
+ *   CSI RX input        SBGGR10_1X10
+ *   CSI RX output       SBGGR10_1X10
+ *   Subset input        SBGGR10_1X10
+ *   Subset output       SBGGR8_1X8
+ *   Demosaic input      SBGGR8_1X8
+ *   Demosaic output     RBG888_1X24
+ *   Frame Buffer        RGB888/BGR888
  */
+
 
 /dts-v1/;
 /plugin/;
@@ -24,8 +67,14 @@
 /* ------------------------------------------------------------------------- */
 
 &fpga_full {
+
 	firmware-name = "csi2_testing_wrapper.bit.bin";
 	resets = <&zynqmp_reset 116>;
+
+
+	/* ----------------------------------------------------------------- */
+	/* FCLK0                                                             */
+	/* ----------------------------------------------------------------- */
 
 	clocking0: clocking0 {
 		#clock-cells = <0>;
@@ -35,8 +84,14 @@
 
 		clock-output-names = "fabric_clk";
 		clocks = <&zynqmp_clk 71>;
+
 		compatible = "xlnx,fclk";
 	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* AFI configuration                                                 */
+	/* ----------------------------------------------------------------- */
 
 	afi0: afi0 {
 		compatible = "xlnx,afi-fpga";
@@ -66,35 +121,49 @@
 			<&zynqmp_reset 119>;
 	};
 
-	/*
-	 * Physical Clocking Wizard outputs.  Do not derive these from FCLK0 in
-	 * the device tree: FCLK0 is the Clocking Wizard input, not these outputs.
-	 */
+
+	/* ----------------------------------------------------------------- */
+	/* Physical Clocking Wizard outputs                                  */
+	/*                                                                   */
+	/* These describe real PL clocks. They are not derived from FCLK0    */
+	/* through the Linux clock framework.                                */
+	/* ----------------------------------------------------------------- */
+
 	video_clk_150mhz: csi2-video-clock-150mhz {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
+
 		clock-frequency = <150000000>;
 		clock-output-names = "csi2-testing-video-150mhz";
 	};
 
+
 	dphy_clk_200mhz: csi2-dphy-clock-200mhz {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
+
 		clock-frequency = <200000000>;
 		clock-output-names = "csi2-testing-dphy-200mhz";
 	};
 
+
 	ov5647_xclk: ov5647-xclk {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
+
 		clock-frequency = <25000000>;
 		clock-output-names = "csi2-testing-ov5647-xclk";
 	};
 
-	/*
-	 * The composite driver exposes /dev/mediaN, /dev/v4l-subdevN and
-	 * /dev/videoN.  Frame Buffer Write channel 0 is the capture DMA.
-	 */
+
+	/* ----------------------------------------------------------------- */
+	/* Xilinx V4L2 composite capture device                              */
+	/*                                                                   */
+	/* Frame Buffer Write channel 0 is the DMA capture engine.           */
+	/*                                                                   */
+	/* Media graph terminates at Demosaic output.                        */
+	/* ----------------------------------------------------------------- */
+
 	video_capture: video-capture {
 		compatible = "xlnx,video";
 
@@ -117,6 +186,64 @@
 			};
 		};
 	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* AXI4-Stream Subset Converter                                      */
+	/*                                                                   */
+	/* Hardware conversion:                                              */
+	/*                                                                   */
+	/*       RAW10 -> RAW8                                               */
+	/*                                                                   */
+	/* The actual TDATA bit selection/remapping is configured in Vivado. */
+	/* The Linux node represents that fixed hardware conversion in the   */
+	/* media graph.                                                      */
+	/*                                                                   */
+	/* Make sure Vivado also preserves:                                  */
+	/*                                                                   */
+	/*       TVALID                                                      */
+	/*       TREADY                                                      */
+	/*       TUSER[0] (SOF)                                              */
+	/*       TLAST    (EOL)                                              */
+	/* ----------------------------------------------------------------- */
+
+	subset_converter: isp_subset_convertor {
+		compatible = "xlnx,axis-subsetconv-1.1";
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+
+			/* ------------------------------------------------- */
+			/* CSI RX -> Subset Converter                        */
+			/* RAW10                                             */
+			/* ------------------------------------------------- */
+
+			port@0 {
+				reg = <0>;
+
+				subset_in: endpoint {
+					remote-endpoint = <&mipi_csi_out>;
+				};
+			};
+
+
+			/* ------------------------------------------------- */
+			/* Subset Converter -> Demosaic                      */
+			/* RAW8                                              */
+			/* ------------------------------------------------- */
+
+			port@1 {
+				reg = <1>;
+
+				subset_out: endpoint {
+					remote-endpoint = <&demosaic_in>;
+				};
+			};
+		};
+	};
 };
 
 
@@ -125,15 +252,20 @@
 /* ------------------------------------------------------------------------- */
 
 &amba {
+
 	#address-cells = <2>;
 	#size-cells = <2>;
 
 
 	/* ----------------------------------------------------------------- */
-	/* AXI GPIO: active-low resets for the video-processing IP           */
+	/* AXI GPIO                                                          */
+	/*                                                                   */
+	/* GPIO[0] -> Demosaic reset                                         */
+	/* GPIO[1] -> Frame Buffer Write reset                               */
 	/* ----------------------------------------------------------------- */
 
 	axi_gpio_0: gpio@80000000 {
+
 		compatible =
 			"xlnx,axi-gpio-2.0",
 			"xlnx,xps-gpio-1.00.a";
@@ -148,6 +280,7 @@
 
 		xlnx,all-inputs = <0x0>;
 		xlnx,all-inputs-2 = <0x0>;
+
 		xlnx,all-outputs = <0x1>;
 		xlnx,all-outputs-2 = <0x0>;
 
@@ -168,10 +301,13 @@
 
 
 	/* ----------------------------------------------------------------- */
-	/* AXI IIC, PCA9546 mux, and OV5647                                  */
+	/* AXI IIC                                                           */
+	/*                                                                   */
+	/* AXI IIC -> PCA9546 -> channel 2 -> OV5647                         */
 	/* ----------------------------------------------------------------- */
 
 	axi_iic_0: i2c@80010000 {
+
 		compatible =
 			"xlnx,axi-iic-2.1",
 			"xlnx,xps-iic-2.00.a";
@@ -181,9 +317,6 @@
 		clock-names = "s_axi_aclk";
 		clocks = <&zynqmp_clk 71>;
 
-		/*
-		 * Retain 100 kHz during initial camera bring-up.
-		 */
 		clock-frequency = <100000>;
 
 		interrupt-names = "iic2intc_irpt";
@@ -195,32 +328,45 @@
 
 		status = "okay";
 
-		/*
-		 * KV260 carrier-card PCA9546 four-channel I2C mux.
-		 *
-		 * Do not add i2c-mux-idle-disconnect. Disconnecting the
-		 * channel between operations prevented the OV5647 driver
-		 * from completing its probe sequence.
-		 */
+
+		/* --------------------------------------------------------- */
+		/* PCA9546                                                  */
+		/* --------------------------------------------------------- */
+
 		i2c_mux: i2c-mux@74 {
+
 			compatible = "nxp,pca9546";
 			reg = <0x74>;
 
 			#address-cells = <1>;
 			#size-cells = <0>;
 
-
 			/*
-			 * Channel 2 is connected to Raspberry Pi
-			 * camera connector J9.
+			 * Do not add i2c-mux-idle-disconnect.
+			 *
+			 * Keeping the channel selected has previously been
+			 * required for reliable OV5647 probing on this design.
 			 */
+
+
+			/* ------------------------------------------------- */
+			/* Raspberry Pi camera connector: mux channel 2      */
+			/* ------------------------------------------------- */
+
 			i2c_rpi: i2c@2 {
+
 				reg = <2>;
 
 				#address-cells = <1>;
 				#size-cells = <0>;
 
+
+				/* ----------------------------------------- */
+				/* OV5647                                    */
+				/* ----------------------------------------- */
+
 				ov5647: camera@36 {
+
 					compatible = "ovti,ov5647";
 					reg = <0x36>;
 
@@ -229,17 +375,20 @@
 
 					status = "okay";
 
+
 					port {
+
 						ov5647_out: endpoint {
+
 							clock-lanes = <0>;
 							data-lanes = <1 2>;
 
 							/*
-							 * The absence of
-							 * clock-noncontinuous
-							 * selects continuous
-							 * MIPI clocking.
+							 * No clock-noncontinuous
+							 * property means continuous
+							 * CSI-2 clocking.
 							 */
+
 							remote-endpoint =
 								<&mipi_csi_in>;
 						};
@@ -251,16 +400,24 @@
 
 
 	/* ----------------------------------------------------------------- */
-	/* MIPI CSI-2 RX: two lanes, RAW10 (CSI-2 data type 0x2b)            */
+	/* MIPI CSI-2 RX                                                     */
+	/*                                                                   */
+	/* OV5647 RAW10 -> CSI RX -> RAW10                                   */
 	/* ----------------------------------------------------------------- */
 
 	mipi_csi2_rx_subsyst_0:
 	mipi-csi2-rx-subsystem@80020000 {
+
 		compatible =
 			"xlnx,mipi-csi2-rx-subsystem-6.0",
 			"xlnx,mipi-csi2-rx-subsystem-5.0";
 
 		reg = <0x0 0x80020000 0x0 0x1000>;
+
+
+		/* --------------------------------------------------------- */
+		/* Clocks                                                    */
+		/* --------------------------------------------------------- */
 
 		clock-names =
 			"dphy_clk_200M",
@@ -272,12 +429,27 @@
 			<&zynqmp_clk 71>,
 			<&video_clk_150mhz>;
 
+
+		/* --------------------------------------------------------- */
+		/* Interrupt                                                 */
+		/* --------------------------------------------------------- */
+
 		interrupt-names = "csirxss_csi_irq";
 		interrupt-parent = <&gic>;
 		interrupts = <0 90 4>;
 
+
+		/* --------------------------------------------------------- */
+		/* CSI configuration                                         */
+		/* --------------------------------------------------------- */
+
 		xlnx,axis-tdata-width = <32>;
+
+		/*
+		 * CSI-2 data type 0x2B = RAW10.
+		 */
 		xlnx,csi-pxl-format = <0x2b>;
+
 		xlnx,max-lanes = <2>;
 		xlnx,ppc = <1>;
 		xlnx,vc = <4>;
@@ -285,35 +457,56 @@
 
 		status = "okay";
 
+
 		ports {
+
 			#address-cells = <1>;
 			#size-cells = <0>;
 
+
+			/* ------------------------------------------------- */
+			/* OV5647 -> CSI RX                                  */
+			/*                                                   */
+			/* RAW10 BGGR                                        */
+			/* ------------------------------------------------- */
+
 			port@0 {
+
 				reg = <0>;
 
-				/* XVIP_VF_MONO_SENSOR, 10-bit Bayer BGGR. */
 				xlnx,video-format = <12>;
 				xlnx,video-width = <10>;
 				xlnx,cfa-pattern = "bggr";
 
 				mipi_csi_in: endpoint {
+
 					clock-lanes = <0>;
 					data-lanes = <1 2>;
-					remote-endpoint = <&ov5647_out>;
+
+					remote-endpoint =
+						<&ov5647_out>;
 				};
 			};
 
+
+			/* ------------------------------------------------- */
+			/* CSI RX -> AXIS Subset Converter                   */
+			/*                                                   */
+			/* RAW10 BGGR                                        */
+			/* ------------------------------------------------- */
+
 			port@1 {
+
 				reg = <1>;
 
-				/* CSI RX passes the RAW10 Bayer stream through unchanged. */
 				xlnx,video-format = <12>;
 				xlnx,video-width = <10>;
 				xlnx,cfa-pattern = "bggr";
 
 				mipi_csi_out: endpoint {
-					remote-endpoint = <&demosaic_in>;
+
+					remote-endpoint =
+						<&subset_in>;
 				};
 			};
 		};
@@ -321,53 +514,101 @@
 
 
 	/* ----------------------------------------------------------------- */
-	/* Video Demosaic: RAW10 Bayer input, RGB888 output                  */
+	/* Video Demosaic                                                    */
+	/*                                                                   */
+	/* Input:  RAW8 BGGR                                                 */
+	/* Output: RGB888                                                    */
 	/* ----------------------------------------------------------------- */
 
 	v_demosaic_0: v-demosaic@80030000 {
+
 		compatible =
 			"xlnx,v-demosaic-1.1",
 			"xlnx,v-demosaic";
 
 		reg = <0x0 0x80030000 0x0 0x10000>;
 
+
+		/* --------------------------------------------------------- */
+		/* Clock                                                     */
+		/* --------------------------------------------------------- */
+
 		clock-names = "ap_clk";
 		clocks = <&video_clk_150mhz>;
+
+
+		/* --------------------------------------------------------- */
+		/* Interrupt                                                 */
+		/* --------------------------------------------------------- */
 
 		interrupt-names = "interrupt";
 		interrupt-parent = <&gic>;
 		interrupts = <0 92 4>;
 
-		/* AXI GPIO channel 1, line 0; numeric flag 1 is active-low. */
+
+		/* --------------------------------------------------------- */
+		/* Reset                                                      */
+		/* --------------------------------------------------------- */
+
 		reset-gpios = <&axi_gpio_0 0 1>;
+
+
+		/* --------------------------------------------------------- */
+		/* Hardware limits                                           */
+		/* --------------------------------------------------------- */
 
 		xlnx,max-height = <2160>;
 		xlnx,max-width = <3840>;
+
 		xlnx,s-axi-ctrl-addr-width = <0x6>;
 		xlnx,s-axi-ctrl-data-width = <0x20>;
 
 		status = "okay";
 
+
 		ports {
+
 			#address-cells = <1>;
 			#size-cells = <0>;
 
+
+			/* ------------------------------------------------- */
+			/* Subset Converter -> Demosaic                      */
+			/*                                                   */
+			/* RAW8 BGGR                                         */
+			/* ------------------------------------------------- */
+
 			port@0 {
+
 				reg = <0>;
-				xlnx,video-width = <10>;
+
+				xlnx,video-width = <8>;
 				xlnx,cfa-pattern = "bggr";
 
 				demosaic_in: endpoint {
-					remote-endpoint = <&mipi_csi_out>;
+
+					remote-endpoint =
+						<&subset_out>;
 				};
 			};
 
+
+			/* ------------------------------------------------- */
+			/* Demosaic -> Video Capture                         */
+			/*                                                   */
+			/* RGB888                                            */
+			/* ------------------------------------------------- */
+
 			port@1 {
+
 				reg = <1>;
-				xlnx,video-width = <10>;
+
+				xlnx,video-width = <8>;
 
 				demosaic_out: endpoint {
-					remote-endpoint = <&video_capture_in>;
+
+					remote-endpoint =
+						<&video_capture_in>;
 				};
 			};
 		};
@@ -375,10 +616,14 @@
 
 
 	/* ----------------------------------------------------------------- */
-	/* Video Frame Buffer Write: format-aware stream-to-memory capture   */
+	/* Video Frame Buffer Write                                          */
+	/*                                                                   */
+	/* Input: RGB888                                                     */
+	/* Output: DDR                                                       */
 	/* ----------------------------------------------------------------- */
 
 	v_frmbuf_wr_0: v-frmbuf-wr@80040000 {
+
 		compatible =
 			"xlnx,v-frmbuf-wr-3.0",
 			"xlnx,axi-frmbuf-wr-v2.2";
@@ -387,28 +632,59 @@
 
 		#dma-cells = <1>;
 
+
+		/* --------------------------------------------------------- */
+		/* Clock                                                     */
+		/* --------------------------------------------------------- */
+
 		clock-names = "ap_clk";
 		clocks = <&video_clk_150mhz>;
+
+
+		/* --------------------------------------------------------- */
+		/* Interrupt                                                 */
+		/* --------------------------------------------------------- */
 
 		interrupt-names = "interrupt";
 		interrupt-parent = <&gic>;
 		interrupts = <0 89 4>;
 
-		/* AXI GPIO channel 1, line 1; numeric flag 1 is active-low. */
+
+		/* --------------------------------------------------------- */
+		/* Reset                                                      */
+		/* --------------------------------------------------------- */
+
 		reset-gpios = <&axi_gpio_0 1 1>;
 
+
+		/* --------------------------------------------------------- */
+		/* DMA configuration                                         */
+		/* --------------------------------------------------------- */
+
 		xlnx,dma-addr-width = <32>;
-		xlnx,dma-align = <8>;
+		xlnx,dma-align = <32>;
+
 		xlnx,max-height = <2160>;
 		xlnx,max-width = <3840>;
-		xlnx,pixels-per-clock = <1>;
+
+		xlnx,pixels-per-clock = <4>;
 
 		xlnx,s-axi-ctrl-addr-width = <0x7>;
 		xlnx,s-axi-ctrl-data-width = <0x20>;
 
-		/* These strings must match the formats enabled in the IP GUI. */
-		xlnx,vid-formats = "rgb888", "bgr888", "xbgr2101010";
-		xlnx,video-width = <10>;
+
+		/*
+		 * These formats must correspond to formats actually enabled
+		 * in the Frame Buffer Write Vivado configuration.
+		 *
+		 * "rgb888" allows the V4L2 BGR3 memory representation used
+		 * by the existing capture pipeline.
+		 */
+		xlnx,vid-formats =
+			"rgb888",
+			"bgr888";
+
+		xlnx,video-width = <8>;
 
 		status = "okay";
 	};
