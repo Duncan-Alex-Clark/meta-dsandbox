@@ -1,0 +1,106 @@
+--- a/ov5647.c
++++ b/ov5647.c
+@@ -136,9 +136,24 @@
+ 	{0x3002, 0x00},
+ };
+ 
++/*
++ * KV260 I2C timing fix, part 1 of 2.
++ *
++ * Upstream enables every output pad here ({0x3000, 0x0f} and {0x3001, 0xff}).
++ * On the KV260, writing 0xff to 0x3001 leaves the sensor unable to accept
++ * another SCCB transfer for tens of milliseconds, so either the next write in
++ * this array or the first read in ov5647_detect() returns -EIO and probe
++ * fails with "camera not available, check power".
++ *
++ * Measured on this board: back-to-back writes of 0x3001 = 0xff succeeded
++ * 4/30, while 0x00, 0x0f and 0x55 succeeded 30/30.
++ *
++ * Values from https://github.com/juanma-rm/kv260_rpicamera_to_dp
++ * (plan_port_v4l2.md section 2.3).
++ */
+ static const struct regval_list sensor_oe_enable_regs[] = {
+-	{0x3000, 0x0f},
+-	{0x3001, 0xff},
++	{0x3000, 0x0c},
++	{0x3001, 0x1f},
+ 	{0x3002, 0xe4},
+ };
+ 
+@@ -610,20 +625,43 @@
+ 	return 0;
+ }
+ 
++/*
++ * KV260 I2C timing fix, part 2 of 2.
++ *
++ * Fixing sensor_oe_enable_regs above gets probe through, but ov5647_set_mode()
++ * then pushes a mode register list - 86 entries for 1080p30 - back to back
++ * with no gap, and ov5647_write_array() aborts on the first failure.  On this
++ * board that fails with -EIO, so streaming never starts:
++ *
++ *	ov5647 6-0036: write sensor default regs error
++ *	ov5647 6-0036: Failed to program sensor mode: -5
++ *	ov5647 6-0036: stream start failed: -5
++ *
++ * The sensor simply needs a moment before it will accept the next transfer.
++ * Retrying costs nothing when the bus is behaving, since the first attempt
++ * succeeds and the loop exits immediately.
++ */
++#define OV5647_XFER_RETRIES	20
++
+ static int ov5647_write(struct v4l2_subdev *sd, u16 reg, u8 val)
+ {
+ 	unsigned char data[3] = { reg >> 8, reg & 0xff, val};
+ 	struct i2c_client *client = v4l2_get_subdevdata(sd);
+-	int ret;
++	int ret = -EIO;
++	unsigned int i;
+ 
+-	ret = i2c_master_send(client, data, 3);
+-	if (ret < 0) {
+-		dev_dbg(&client->dev, "%s: i2c write error, reg: %x\n",
+-				__func__, reg);
+-		return ret;
++	for (i = 0; i < OV5647_XFER_RETRIES; i++) {
++		ret = i2c_master_send(client, data, 3);
++		if (ret >= 0)
++			return 0;
++
++		usleep_range(2000, 3000);
+ 	}
+ 
+-	return 0;
++	dev_dbg(&client->dev, "%s: i2c write error, reg: %x\n",
++			__func__, reg);
++
++	return ret;
+ }
+ 
+ static int ov5647_read(struct v4l2_subdev *sd, u16 reg, u8 *val)
+@@ -631,7 +669,8 @@
+ 	struct i2c_client *client = v4l2_get_subdevdata(sd);
+ 	u8 buf[2] = { reg >> 8, reg & 0xff };
+ 	struct i2c_msg msg[2];
+-	int ret;
++	unsigned int i;
++	int ret = -EIO;
+ 
+ 	msg[0].addr = client->addr;
+ 	msg[0].flags = client->flags;
+@@ -643,7 +682,14 @@
+ 	msg[1].buf = buf;
+ 	msg[1].len = 1;
+ 
+-	ret = i2c_transfer(client->adapter, msg, 2);
++	for (i = 0; i < OV5647_XFER_RETRIES; i++) {
++		ret = i2c_transfer(client->adapter, msg, 2);
++		if (ret == 2)
++			break;
++
++		usleep_range(2000, 3000);
++	}
++
+ 	if (ret != 2) {
+ 		dev_err(&client->dev, "%s: i2c read error, reg: %x = %d\n",
+ 			__func__, reg, ret);

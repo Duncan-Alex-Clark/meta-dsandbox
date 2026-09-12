@@ -42,25 +42,25 @@ modetest -M zynqmp-dpsub \
 4. Set the display to 1920x1080p
 
 modetest -M zynqmp-dpsub \
->     -s 42@40:1920x1080-60@BG24 \
->     -d
+     -s 42@40:1920x1080-60@BG24 \
+     -d
 
 5. Open a new terminal tab and start an ssh session as root user into the KV260
 6. Start the video streaming session
 
 gst-launch-1.0 -v \
->     v4l2src \
->         device=/dev/video0 \
->         io-mode=mmap \
->     ! video/x-raw,width=1920,height=1080,format=BGR,framerate=30/1 \
->     ! kmssink \
->         driver-name=zynqmp-dpsub \
->         plane-id=33 \
->         can-scale=false \
->         render-rectangle='<0,0,1920,1080>' \
->         hold-extra-sample=true \
->         show-preroll-frame=false \
->         sync=true
+     v4l2src \
+         device=/dev/video0 \
+         io-mode=mmap \
+     ! video/x-raw,width=1920,height=1080,format=BGR,framerate=30/1 \
+     ! kmssink \
+         driver-name=zynqmp-dpsub \
+         plane-id=33 \
+         can-scale=false \
+         render-rectangle='<0,0,1920,1080>' \
+         hold-extra-sample=true \
+         show-preroll-frame=false \
+         sync=true
 
 ## Conclusion
 After performing the above steps, you should see a video feed visible on your connected display

@@ -1,0 +1,459 @@
+/*
+ * KV260 OV5647 V4L2 capture pipeline
+ *
+ * I2C:
+ *
+ *   AXI IIC 0x80020000
+ *       -> PCA9546 at 0x74
+ *           -> channel 2
+ *               -> OV5647 at 0x36
+ *
+ * Video:
+ *
+ *   OV5647
+ *       -> MIPI CSI-2 RX
+ *           -> Video Demosaic
+ *               -> AXI VDMA S2MM
+ *                   -> DDR
+ *
+ * Reset:
+ *
+ *   AXI GPIO 0x80040000, line 0
+ *       -> v_demosaic_0/ap_rst_n
+ */
+
+/dts-v1/;
+/plugin/;
+
+
+/* ------------------------------------------------------------------------- */
+/* FPGA region and clocks                                                    */
+/* ------------------------------------------------------------------------- */
+
+&fpga_full {
+	firmware-name = "csi2_testing_wrapper.bit.bin";
+	resets = <&zynqmp_reset 116>;
+
+	clocking0: clocking0 {
+		#clock-cells = <0>;
+
+		assigned-clock-rates = <99999001>;
+		assigned-clocks = <&zynqmp_clk 71>;
+
+		clock-output-names = "fabric_clk";
+		clocks = <&zynqmp_clk 71>;
+
+		compatible = "xlnx,fclk";
+	};
+
+	afi0: afi0 {
+		compatible = "xlnx,afi-fpga";
+
+		config-afi =
+			<0 0>,
+			<1 0>,
+			<2 0>,
+			<3 0>,
+			<4 0>,
+			<5 0>,
+			<6 0>,
+			<7 0>,
+			<8 0>,
+			<9 0>,
+			<10 0>,
+			<11 0>,
+			<12 0>,
+			<13 0>,
+			<14 0xa00>,
+			<15 0x000>;
+
+		resets =
+			<&zynqmp_reset 116>,
+			<&zynqmp_reset 117>,
+			<&zynqmp_reset 118>,
+			<&zynqmp_reset 119>;
+	};
+
+	/*
+	 * Physical 150 MHz output from the Clocking Wizard.
+	 *
+	 * The bitstream configures and generates this clock. This node
+	 * describes the running clock to the Linux clock framework.
+	 */
+	video_clk_150mhz: csi2-video-clock-150mhz {
+		compatible = "fixed-clock";
+
+		#clock-cells = <0>;
+
+		clock-frequency = <150000000>;
+		clock-output-names = "csi2-testing-video-150mhz";
+	};
+
+	/*
+	 * Physical 200 MHz output from the Clocking Wizard.
+	 */
+	dphy_clk_200mhz: csi2-dphy-clock-200mhz {
+		compatible = "fixed-clock";
+
+		#clock-cells = <0>;
+
+		clock-frequency = <200000000>;
+		clock-output-names = "csi2-testing-dphy-200mhz";
+	};
+
+	/*
+	 * Physical 25 MHz clock supplied to the OV5647 XCLK input.
+	 */
+	ov5647_xclk: ov5647-xclk {
+		compatible = "fixed-clock";
+
+		#clock-cells = <0>;
+
+		clock-frequency = <25000000>;
+		clock-output-names = "csi2-testing-ov5647-xclk";
+	};
+};
+
+
+/* ------------------------------------------------------------------------- */
+/* Programmable-logic peripherals                                            */
+/* ------------------------------------------------------------------------- */
+
+&amba {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+
+	/* ----------------------------------------------------------------- */
+	/* AXI GPIO for HLS/video-IP resets                                  */
+	/* ----------------------------------------------------------------- */
+
+	axi_gpio_0: gpio@80040000 {
+		compatible =
+			"xlnx,axi-gpio-2.0",
+			"xlnx,xps-gpio-1.00.a";
+
+		reg = <0x0 0x80040000 0x0 0x10000>;
+
+		clock-names = "s_axi_aclk";
+		clocks = <&zynqmp_clk 71>;
+
+		gpio-controller;
+		#gpio-cells = <2>;
+
+		xlnx,all-inputs = <0x0>;
+		xlnx,all-inputs-2 = <0x0>;
+		xlnx,all-outputs = <0x1>;
+		xlnx,all-outputs-2 = <0x0>;
+
+		xlnx,dout-default = <0xffffffff>;
+		xlnx,dout-default-2 = <0x00000000>;
+
+		xlnx,gpio-width = <0x2>;
+		xlnx,gpio2-width = <0x20>;
+
+		xlnx,interrupt-present = <0x0>;
+		xlnx,is-dual = <0x0>;
+
+		xlnx,tri-default = <0xffffffff>;
+		xlnx,tri-default-2 = <0xffffffff>;
+
+		status = "okay";
+	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* AXI IIC, PCA9546 mux and OV5647                                   */
+	/* ----------------------------------------------------------------- */
+
+	axi_iic_0: i2c@80020000 {
+		compatible =
+			"xlnx,axi-iic-2.1",
+			"xlnx,xps-iic-2.00.a";
+
+		reg = <0x0 0x80020000 0x0 0x10000>;
+
+		clock-names = "s_axi_aclk";
+		clocks = <&zynqmp_clk 71>;
+
+		/*
+		 * Retain 100 kHz during initial camera bring-up.
+		 */
+		clock-frequency = <100000>;
+
+		interrupt-names = "iic2intc_irpt";
+		interrupt-parent = <&gic>;
+		interrupts = <0 91 4>;
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		status = "okay";
+
+		/*
+		 * KV260 carrier-card PCA9546 four-channel I2C mux.
+		 *
+		 * Do not add i2c-mux-idle-disconnect. Disconnecting the
+		 * channel between operations prevented the OV5647 driver
+		 * from completing its probe sequence.
+		 */
+		i2c_mux: i2c-mux@74 {
+			compatible = "nxp,pca9546";
+			reg = <0x74>;
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+
+			/*
+			 * Channel 2 is connected to Raspberry Pi
+			 * camera connector J9.
+			 */
+			i2c_rpi: i2c@2 {
+				reg = <2>;
+
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				ov5647: camera@36 {
+					compatible = "ovti,ov5647";
+					reg = <0x36>;
+
+					clocks = <&ov5647_xclk>;
+					clock-names = "xclk";
+
+					status = "okay";
+
+					port {
+						ov5647_out: endpoint {
+							clock-lanes = <0>;
+							data-lanes = <1 2>;
+
+							/*
+							 * The absence of
+							 * clock-noncontinuous
+							 * selects continuous
+							 * MIPI clocking.
+							 */
+							remote-endpoint =
+								<&mipi_csi_in>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* AXI VDMA: stream-to-memory channel                                */
+	/* ----------------------------------------------------------------- */
+
+	axi_vdma_0: dma@80000000 {
+		compatible =
+			"xlnx,axi-vdma-6.3",
+			"xlnx,axi-vdma-1.00.a";
+
+		reg = <0x0 0x80000000 0x0 0x10000>;
+
+		#dma-cells = <1>;
+
+		clock-names =
+			"m_axi_s2mm_aclk",
+			"s_axi_lite_aclk",
+			"s_axis_s2mm_aclk";
+
+		clocks =
+			<&video_clk_150mhz>,
+			<&zynqmp_clk 71>,
+			<&video_clk_150mhz>;
+
+		interrupt-names = "s2mm_introut";
+		interrupt-parent = <&gic>;
+		interrupts = <0 89 4>;
+
+		xlnx,addrwidth = <0x20>;
+		xlnx,flush-fsync = <0x1>;
+		xlnx,num-fstores = <0x3>;
+
+		status = "okay";
+
+		dma-channel@80000030 {
+			compatible = "xlnx,axi-vdma-s2mm-channel";
+
+			interrupts = <0 89 4>;
+
+			/*
+			 * 0x30 = 48-bit AXI4-Stream interface.
+			 */
+			xlnx,datawidth = <0x30>;
+			xlnx,device-id = <0x0>;
+			xlnx,genlock-mode;
+		};
+	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* Xilinx MIPI CSI-2 Receiver Subsystem                              */
+	/* ----------------------------------------------------------------- */
+
+	mipi_csi2_rx_subsyst_0:
+	mipi-csi2-rx-subsystem@80010000 {
+		compatible =
+			"xlnx,mipi-csi2-rx-subsystem-6.0",
+			"xlnx,mipi-csi2-rx-subsystem-5.0";
+
+		reg = <0x0 0x80010000 0x0 0x1000>;
+
+		clock-names =
+			"dphy_clk_200M",
+			"lite_aclk",
+			"video_aclk";
+
+		clocks =
+			<&dphy_clk_200mhz>,
+			<&zynqmp_clk 71>,
+			<&video_clk_150mhz>;
+
+		interrupt-names = "csirxss_csi_irq";
+		interrupt-parent = <&gic>;
+		interrupts = <0 90 4>;
+
+		xlnx,axis-tdata-width = <32>;
+		xlnx,csi-pxl-format = <0x2b>;
+		xlnx,max-lanes = <2>;
+		xlnx,ppc = <1>;
+		xlnx,vc = <4>;
+		xlnx,vfb;
+
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * Sink port from OV5647.
+			 */
+			port@0 {
+				reg = <0>;
+
+				mipi_csi_in: endpoint {
+					clock-lanes = <0>;
+					data-lanes = <1 2>;
+
+					remote-endpoint =
+						<&ov5647_out>;
+				};
+			};
+
+			/*
+			 * RAW10 AXI4-Stream output to the demosaic.
+			 */
+			port@1 {
+				reg = <1>;
+
+				mipi_csi_out: endpoint {
+					remote-endpoint =
+						<&demosaic_in>;
+				};
+			};
+		};
+	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* Xilinx Video Demosaic                                             */
+	/* ----------------------------------------------------------------- */
+
+	v_demosaic_0: v-demosaic@80030000 {
+		compatible =
+			"xlnx,v-demosaic-1.1",
+			"xlnx,v-demosaic";
+
+		reg = <0x0 0x80030000 0x0 0x10000>;
+
+		clock-names = "ap_clk";
+		clocks = <&video_clk_150mhz>;
+
+		interrupt-names = "interrupt";
+		interrupt-parent = <&gic>;
+		interrupts = <0 92 4>;
+
+		/*
+		 * AXI GPIO channel 1, line 0.
+		 *
+		 * Numeric flag 1 means GPIO_ACTIVE_LOW. This matches
+		 * an active-low ap_rst_n connection.
+		 */
+		reset-gpios = <&axi_gpio_0 0 1>;
+
+		xlnx,max-height = <2160>;
+		xlnx,max-width = <3840>;
+		xlnx,s-axi-ctrl-addr-width = <0x6>;
+		xlnx,s-axi-ctrl-data-width = <0x20>;
+
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * RAW Bayer input from CSI-2 RX.
+			 */
+			port@0 {
+				reg = <0>;
+
+				demosaic_in: endpoint {
+					remote-endpoint =
+						<&mipi_csi_out>;
+				};
+			};
+
+			/*
+			 * RGB output to VDMA-backed capture.
+			 */
+			port@1 {
+				reg = <1>;
+
+				demosaic_out: endpoint {
+					remote-endpoint =
+						<&video_capture_in>;
+				};
+			};
+		};
+	};
+
+
+	/* ----------------------------------------------------------------- */
+	/* Xilinx V4L2 composite capture device                              */
+	/* ----------------------------------------------------------------- */
+
+	video_capture: video-capture {
+		compatible = "xlnx,video";
+
+		/*
+		 * Xilinx VDMA channel 1 is the S2MM channel.
+		 */
+		dmas = <&axi_vdma_0 1>;
+		dma-names = "port0";
+
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				direction = "input";
+
+				video_capture_in: endpoint {
+					remote-endpoint =
+						<&demosaic_out>;
+				};
+			};
+		};
+	};
+};

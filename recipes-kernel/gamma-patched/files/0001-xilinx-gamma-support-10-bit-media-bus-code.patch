@@ -1,0 +1,47 @@
+--- a/xilinx-gamma.c
++++ b/xilinx-gamma.c
+@@ -194,6 +194,21 @@
+ 	return 0;
+ }
+ 
++/*
++ * xg_native_mbus_code - media bus code matching the IP's built data width
++ *
++ * The Gamma LUT is built for a fixed number of bits per component, taken from
++ * xlnx,video-width and used to select the curve tables.  Report the media bus
++ * code that actually matches it instead of always claiming 8-bit RGB.
++ */
++static u32 xg_native_mbus_code(struct xgamma_dev *xg)
++{
++	if (xg->color_depth == GAMMA_BPC_10)
++		return MEDIA_BUS_FMT_RBG101010_1X30;
++
++	return MEDIA_BUS_FMT_RBG888_1X24;
++}
++
+ static int xg_set_format(struct v4l2_subdev *subdev,
+ 			 struct v4l2_subdev_state *sd_state,
+ 			 struct v4l2_subdev_format *fmt)
+@@ -208,10 +223,11 @@
+ 	*__format = fmt->format;
+ 
+ 	if (fmt->pad == XVIP_PAD_SINK) {
+-		if (__format->code != MEDIA_BUS_FMT_RBG888_1X24) {
++		if (__format->code != MEDIA_BUS_FMT_RBG888_1X24 &&
++		    __format->code != MEDIA_BUS_FMT_RBG101010_1X30) {
+ 			dev_dbg(xg->xvip.dev,
+ 				"Unsupported sink media bus code format");
+-			__format->code = MEDIA_BUS_FMT_RBG888_1X24;
++			__format->code = xg_native_mbus_code(xg);
+ 		}
+ 	}
+ 	__format->width = clamp_t(unsigned int, fmt->format.width,
+@@ -475,7 +491,7 @@
+ 	/* Default Formats Initialization */
+ 	def_fmt = &xg->default_formats[XVIP_PAD_SINK];
+ 	/* GAMMA LUT IP only to be supported for RGB */
+-	def_fmt->code = MEDIA_BUS_FMT_RBG888_1X24;
++	def_fmt->code = xg_native_mbus_code(xg);
+ 	def_fmt->field = V4L2_FIELD_NONE;
+ 	def_fmt->colorspace = V4L2_COLORSPACE_SRGB;
+ 	def_fmt->width = XGAMMA_DEF_WIDTH;
